@@ -42,18 +42,28 @@ def plot_curve(settings, object_index, modification_type = "CUTOFF", cutoff = 0,
     primary_light_curve = data[object_id][0]["light_curve"]
     primary_predicted_curve = data[object_id][0]["predicted_curve"]
 
-    # Reference time
     start_time = np.min(primary_predicted_curve.time)
+    end_time = max(primary_predicted_curve.time.flatten())
+
+    # Reference time
     primary_ref_time = data[object_id][0]['predictions']['reference_time'] - start_time
     modified_ref_time = data[object_id][mod_index]['predictions']['reference_time'] - start_time
     ref_error = data[object_id][0]['predictions']['reference_time_error']
 
+    # Isolates the variable part of the light curve
+    variability_start = start_time#data[object_id][0]['predictions']['reference_time'] - 35
+    variability_end = end_time#data[object_id][0]['predictions']['reference_time'] + 80
+    variability_range = np.where((data[object_id][0]["light_curve"]["time"] > variability_start)
+                            & (data[object_id][0]["light_curve"]["time"] < variability_end))[0]
+    start_index = variability_range[0]
+    end_index = variability_range[-1]
+    
     # Trims the vertical portion of the light curve to only contain visible data
-    min_y = min(primary_light_curve["flux"]) if show_scatter != "off" else min(primary_predicted_curve.flux.flatten())
-    max_y = max(primary_predicted_curve.flux.flatten())
+    min_y = min(primary_light_curve["flux"][start_index:end_index]) if show_scatter != "off" else min(primary_predicted_curve.flux.flatten()[start_index:end_index])
+    max_y = max(max(primary_predicted_curve.flux.flatten()[start_index:end_index]), max(primary_light_curve["flux"][start_index:end_index]))
 
     # Only plots bandpasses which were both used in modifications and were set to be shown
-    for band in set.intersection(shown_bands, used_bands):
+    for band in set(shown_bands).intersection(used_bands):
         band_index = settings['all_bands'].index(band)
 
         # Plots the predicted light curve for the unmodified sample in the given band
@@ -79,13 +89,16 @@ def plot_curve(settings, object_index, modification_type = "CUTOFF", cutoff = 0,
             ax.plot(predicted_curve.time - start_time, predicted_curve.flux[0][band_index],
                     label = f"{len(light_curve)} points", linewidth = 1.5,
                     color = settings['band_colors'][band_index])
-            max_y = max(max(predicted_curve.flux.flatten()), max_y)
+            max_y = max(max(predicted_curve.flux.flatten()[start_index:end_index]), max_y)
 
     # Restrict the viewed area to the variable portion of the light curve
     if isolate_variability:
-        max_time = max(primary_predicted_curve.time.flatten()) - start_time
-        ax.set_xlim(left = max(primary_ref_time - 40, 0), right = min(primary_ref_time + 300, max_time))
-    ax.set_ylim(top = max_y + 2, bottom = min_y - 2)
+        ax.set_xlim(left = variability_start - start_time, right = min(variability_end, end_time) - start_time)
+    else:
+        ax.set_xlim(left = 0, right = end_time - start_time)
+    #print(min_y, max_y)
+
+    ax.set_ylim(top = max_y + (0.1 * max_y), bottom = min_y - (0.1 * abs(max_y)))
 
     # Plots a dashed bar showing the reference time for the unmodified dataset
     ax.axvline(primary_ref_time, min_y - 2, max_y + 2, color='black', ls="--")
@@ -106,17 +119,20 @@ def plot_curve(settings, object_index, modification_type = "CUTOFF", cutoff = 0,
 
     plt.show();
 
-def plot_interactable_curve(settings):
+def plot_interactable_curve(settings, mask = None):
     """
     Predicts and plots a full light curve for a single object, with interactive options determining how the observation data is modified and visualized.
 
     :param dict settings: A dictionary containing various settings needed for making modifications.
     """
 
+    data_length = len(settings['dataset'])# if mask is None else len(settings['dataset'][mask])
+    #data_indices = range(0, data_length) if mask is None else mask.nonzero()
+
     # Create widgets for adjusting each of the possible options
     band_list = ["ALL"] + settings['all_bands']
     modification_type = ipy.Dropdown(options = ["CUTOFF", "REFERENCE TIME"], description = "Modification Type:", style={'description_width': 'initial'})
-    object_index = ipy.BoundedIntText(min = 0, max = len(settings['dataset']) - 1, step = 1, value = 0, description = "Object Index:",
+    object_index = ipy.BoundedIntText(min = 0, max = data_length - 1, step = 1, value = 0, description = "Index:",
                                       continuous_update = False, style={'description_width': 'initial'})
     cutoff = ipy.SelectionSlider(options = [0, 64, 48, 32, 24, 16, 12, 8, 6, 4], description = "Cutoff:", continuous_update = False)
     ref_time_offset = ipy.FloatSlider(min = -10, max = 10, step = 0.25, description = "Reference Time Offset:",
@@ -139,13 +155,14 @@ def plot_interactable_curve(settings):
     output = ipy.interactive_output(
         plot_curve, {
             "settings": ipy.fixed(settings),
+            #"object_index": data_indices[object_index],
             "object_index": object_index,
             "modification_type": modification_type,
             "cutoff": cutoff,
             "ref_time_offset": ref_time_offset,
             "used_bands": used_bands,
             "shown_bands": shown_bands,
-            "show_scatter": show_scatter
+            "show_scatter": show_scatter,
             #"isolate_variability": isolate_variability
         });
 
@@ -219,7 +236,7 @@ def plot_class_grid(data, xaxis_label = "", classes = "ALL", max_objects = -1):
 
     # For each class, create an table of the classifications and modifications
     for i in range(len(data_tables)):
-
+        
         ax.flat[i].set_title(f"{data_tables[i]['class']} ({data_tables[i]['count']} objects)")
         table = np.zeros((len(row_labels), len(column_labels)))
 
@@ -250,4 +267,3 @@ def plot_class_grid(data, xaxis_label = "", classes = "ALL", max_objects = -1):
     if cols * rows > len(data_tables): fig.delaxes(ax.flat[-1])
 
     plt.show()
-

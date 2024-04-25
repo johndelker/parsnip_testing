@@ -4,6 +4,7 @@ import parsnip
 import lcdata
 from collections import namedtuple
 import warnings
+from tqdm import tqdm
 
 # Hide a few warnings that would otherwise fill the page
 warnings.filterwarnings('ignore', category = FutureWarning)
@@ -62,12 +63,13 @@ def restrict_bands(dataset, bands):
 	return modified_dataset
 
 
-def restrict_observation_count(dataset, max_observations_per_band):
+def restrict_observation_count(dataset, max_observations_per_band, variability_start = None, variability_end = None):
 	"""
 	Removes observations past the max number of observations specified.
-
     :param lcdata.dataset.Dataset dataset: A  dataset containing light curve data for one or more objects.
     :param int max_observations_per_band: The maximum number of observations that should be kept per bandpass. Observations past this count will be removed.
+    :param variability_start: 
+    :param variability_end:
     :return: The modified dataset, with observations removed.
 	"""
 
@@ -76,13 +78,24 @@ def restrict_observation_count(dataset, max_observations_per_band):
 
 	# For each object in the dataset, limit the number of observations in each band
 	for i in range(0, len(modified_dataset)):
+
+		# Restricts points used to only points within the range of variability on the curve
+		if variability_start is not None or variability_end is not None:
+			mask = np.ones(len(modified_dataset.light_curves[i]), dtype = bool)
+			for n in range(0, len(modified_dataset.light_curves[i])):
+				obj_time = modified_dataset.light_curves[i][n]["time"]
+				if (variability_start is not None and obj_time < variability_start) or (variability_end is not None and obj_time > variability_end):
+					mask[n] = False
+			modified_dataset.light_curves[i] = modified_dataset.light_curves[i][mask]
+
 		# Group the light curves by band so that each band can be manipulated individually
-		light_curve = dataset.light_curves[i].group_by('band')
+		light_curve = modified_dataset.light_curves[i].group_by('band')
 		group_count = len(light_curve.groups.indices) - 1
 
 		# Create a mask to remove points from each group/band
 		mask = np.ones(len(light_curve), dtype = bool)
 		for n in range(0, group_count):
+
 			lower_bound = light_curve.groups.indices[n]
 			upper_bound = light_curve.groups.indices[n + 1]
 
@@ -113,7 +126,7 @@ def classify_offsets(settings, sample_size, used_bands, offsets = None, object_i
 def classify_cutoffs(settings, sample_size, used_bands, cutoffs = None, object_index = None):
 	"""
 	Classifies a dataset or object multiple times using given cutoffs0 to study the effects of limited observation counts on the results of ParSNIP.
-
+	
     :param dict settings: A dictionary containing various settings needed for making modifications.
     :param int sample_size: The number of objects to include from the dataset.
     :param list[str] used_bands: A list of the bandpasses that should be included in the test. Any bands not included will be removed from the dataset.
@@ -158,16 +171,24 @@ def classify_modifications(settings, sample_size, used_bands, modification_type 
 	classified_data = {
 		"used_bands": used_bands,
 		"used_cutoffs": modifications if modification_type == "CUTOFF" else None,
-		"used_offsets": modifications if modification_type == "REFERENCE TIME" else None
+		"used_offsets": modifications if modification_type == "REFERENCE TIME" else None 
 	}
+
+	variability_start = None
+	variability_end = None
 
 	# Classify the dataset for each modification
 	for modification in modifications:
 
 		# If modifying observation count, remove points from the light curves for each object in the dataset before making predictions
 		if modification_type == "CUTOFF":
-			modified_dataset = restrict_observation_count(dataset, modification)
+			modified_dataset = restrict_observation_count(dataset, modification, variability_start, variability_end)
 			predictions = settings["model"].predict_dataset(modified_dataset)
+
+			# Uses the unmodified results to estimate the start and end of variability in the light curve
+			if modification is None:
+				variability_start = predictions['reference_time'] - 35
+				variability_end = predictions['reference_time'] + 80
 
 		# If modifying the reference time, offset the time while making predictions
 		elif modification_type == "REFERENCE TIME":
@@ -218,3 +239,32 @@ def classify_modifications(settings, sample_size, used_bands, modification_type 
 			classified_data.update({ obj: object_info })
 
 	return classified_data
+
+
+def refine_dataset(dataset, min_error_ratio = 10, bands = ["lsstg", "lssti", "lsstr", "lsstz"]):
+
+	print("Refining the dataset by removing objects with a low signal-to-error ratio...")
+
+	init_count = len(dataset)
+	mask = np.full(init_count, True)
+
+	for i in tqdm(range(init_count)):
+
+		light_curve = dataset.light_curves[i].group_by('band')
+		group_count = len(light_curve.groups.indices) - 1
+
+		for j in range(group_count):
+			band = light_curve.groups[j]['band'][0]
+			if not(band in bands): continue;
+			max_flux_index = np.argmax(light_curve.groups[j]["flux"])
+			max_flux = light_curve.groups[j]["flux"][max_flux_index]
+			max_flux_err = light_curve.groups[j]["fluxerr"][max_flux_index]
+			error_ratio = np.abs(max_flux / max_flux_err)
+			if error_ratio < min_error_ratio:
+				mask[i] = False
+				break;
+
+	dataset = dataset[mask]
+	print(f"Removed {init_count - len(dataset)} objects from the dataset with a signal-to-error ratio lower than {min_error_ratio}.")
+
+	return dataset
